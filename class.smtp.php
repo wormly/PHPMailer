@@ -246,6 +246,10 @@ class SMTP
      */
     public function connect($host, $port = null, $timeout = 30, $options = array())
     {
+        $this->_wormlyTimeout = $timeout;
+        $this->_wormlyStarttime = microtime(1);
+        $this->_wormlyConnectHasTimedOut = false;
+
         static $streamok;
         //This is enabled by default since 5.0.0 but some providers disable it
         //Check this once and cache the result
@@ -272,8 +276,7 @@ class SMTP
         $errstr = '';
         if ($streamok) {
             $socket_context = stream_context_create($options);
-            //Suppress errors; connection failures are handled at a higher level
-            $this->smtp_conn = @stream_socket_client(
+            $this->smtp_conn = stream_socket_client(
                 $host . ":" . $port,
                 $errno,
                 $errstr,
@@ -310,16 +313,6 @@ class SMTP
             return false;
         }
         $this->edebug('Connection: opened', self::DEBUG_CONNECTION);
-        // SMTP server can take longer to respond, give longer timeout for first read
-        // Windows does not have support for this timeout function
-        if (substr(PHP_OS, 0, 3) != 'WIN') {
-            $max = ini_get('max_execution_time');
-            // Don't bother if unlimited
-            if ($max != 0 && $timeout > $max) {
-                @set_time_limit($timeout);
-            }
-            stream_set_timeout($this->smtp_conn, $timeout, 0);
-        }
         // Get any announcement
         $announce = $this->get_lines();
         $this->edebug('SERVER -> CLIENT: ' . $announce, self::DEBUG_SERVER);
@@ -735,6 +728,7 @@ class SMTP
         } else {
             $this->server_caps = null;
         }
+        $this->_wormlyCheckForTimeout();
         return $noerror;
     }
 
@@ -870,6 +864,7 @@ class SMTP
             return false;
         }
         $this->client_send($commandstring . self::CRLF);
+        $this->_wormlyCheckForTimeout();
 
         $this->last_reply = $this->get_lines();
         // Fetch SMTP code and possible error code explanation
@@ -1067,11 +1062,29 @@ class SMTP
         $data = '';
         $endtime = 0;
         stream_set_timeout($this->smtp_conn, $this->Timeout);
+        stream_set_blocking($this->smtp_conn, 0);
         if ($this->Timelimit > 0) {
             $endtime = time() + $this->Timelimit;
         }
         while (is_resource($this->smtp_conn) && !feof($this->smtp_conn)) {
             $str = @fgets($this->smtp_conn, 515);
+
+
+            if (microtime(1) - $this->_wormlyStarttime > $this->_wormlyTimeout) {
+                if($this->do_debug >= 4) {
+                  $this->edebug("SMTP -> get_lines(): timed-out (" . $this->_wormlyTimeout . " seconds)");
+              }
+
+              $this->_wormlyConnectHasTimedOut = true;
+              break;
+          }
+
+          if (strlen($str) == 0) {
+            usleep(100000);
+            continue;
+        }
+
+
             $this->edebug("SMTP -> get_lines(): \$data is \"$data\"", self::DEBUG_LOWLEVEL);
             $this->edebug("SMTP -> get_lines(): \$str is  \"$str\"", self::DEBUG_LOWLEVEL);
             $data .= $str;
@@ -1098,7 +1111,16 @@ class SMTP
                 break;
             }
         }
+        stream_set_blocking($this->smtp_conn, 1);
         return $data;
+    }
+
+    private function _wormlyCheckForTimeout()
+    {
+        if ($this->_wormlyConnectHasTimedOut) {
+            $this->error = array(
+            "error" => "Timed out after SMTP connection established");
+        }
     }
 
     /**
