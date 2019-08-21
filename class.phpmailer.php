@@ -448,7 +448,7 @@ class PHPMailer
      * Options: An empty string for PHPMailer default, whitespace for none, or a string to use
      * @var string
      */
-    public $XMailer = '';
+    public $XMailer = 'Wormly';
 
     /**
      * Which validator to use by default when validating email addresses.
